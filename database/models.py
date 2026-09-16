@@ -45,12 +45,7 @@ class User(Base):
         nullable=False,
     )
 
-    # One user has one set of login credentials
-    credential: Mapped["Credential"] = relationship(
-        back_populates="user",
-        uselist=False,
-        cascade="all, delete-orphan",
-    )
+   
 
     # One user has one rating
     rating: Mapped["PlayerRating"] = relationship(
@@ -67,99 +62,7 @@ class User(Base):
     )
 
 
-class Credential(Base):
-    __tablename__ = "credentials"
 
-    user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-
-    password_hash: Mapped[str] = mapped_column(
-        String(255),
-        nullable=False,
-    )
-
-    user: Mapped["User"] = relationship(
-        back_populates="credential",
-    )
-
-
-class PasswordResetToken(Base):
-    __tablename__ = "password_reset_tokens"
-
-    id: Mapped[int] = mapped_column(
-        Integer,
-        primary_key=True,
-    )
-
-    user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-
-    # We store the hash, NOT the actual reset token.
-    token_hash: Mapped[str] = mapped_column(
-        String(255),
-        unique=True,
-        nullable=False,
-    )
-
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        nullable=False,
-    )
-
-    expires_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-    )
-
-    # NULL means the token has not been used.
-    used_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
-
-class UserSession(Base):
-    __tablename__ = "sessions"
-
-    id: Mapped[int] = mapped_column(
-        Integer,
-        primary_key=True,
-    )
-
-    user_id: Mapped[int] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False,
-        index=True,
-    )
-
-    # Store only the hash of the session token.
-    token_hash: Mapped[str] = mapped_column(
-        String(255),
-        unique=True,
-        nullable=False,
-    )
-
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        server_default=func.now(),
-        nullable=False,
-    )
-
-    expires_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True),
-        nullable=False,
-    )
-
-    # NULL = active session
-    revoked_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-    )
 
 class PlayerRating(Base):
     __tablename__ = "player_ratings"
