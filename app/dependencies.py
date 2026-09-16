@@ -5,9 +5,8 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.orm import Session
 
-from app.auth import hash_session_token
 from database.database import SessionLocal
-from database.models import User, UserSession
+from database.models import User
 
 from app.firebase import verify_firebase_token
 
@@ -24,54 +23,7 @@ def get_db() -> Generator:
         db.close()
 
 
-def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
-    db: Session = Depends(get_db),
-) -> User:
 
-    token = credentials.credentials
-
-    token_hash = hash_session_token(token)
-
-    user_session = (
-        db.query(UserSession)
-        .filter(UserSession.token_hash == token_hash)
-        .first()
-    )
-
-    if not user_session:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication token.",
-        )
-
-    now = datetime.now(timezone.utc)
-
-    if user_session.revoked_at is not None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Session has been revoked.",
-        )
-
-    if user_session.expires_at <= now:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Session has expired.",
-        )
-
-    user = (
-        db.query(User)
-        .filter(User.id == user_session.user_id)
-        .first()
-    )
-
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User account not found.",
-        )
-
-    return user
 
 def get_firebase_identity(
     credentials: HTTPAuthorizationCredentials = Depends(security),
