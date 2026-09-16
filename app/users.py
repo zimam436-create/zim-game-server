@@ -1,3 +1,4 @@
+import os
 import requests
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
@@ -26,6 +27,52 @@ class RegisterRequest(BaseModel):
 
 class PasswordResetRequest(BaseModel):
     email: str
+
+@router.post("/password-reset")
+def request_password_reset(request: PasswordResetRequest):
+    """Ask Firebase to send a password-reset email."""
+
+    email = request.email.lower().strip()
+
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email address is required.",
+        )
+
+    firebase_api_key = os.getenv("FIREBASE_WEB_API_KEY")
+
+    if not firebase_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Firebase API key is not configured.",
+        )
+
+    url = (
+        "https://identitytoolkit.googleapis.com/v1/"
+        "accounts:sendOobCode"
+    )
+
+    response = requests.post(
+        url,
+        params={"key": firebase_api_key},
+        json={
+            "requestType": "PASSWORD_RESET",
+            "email": email,
+        },
+        timeout=10,
+    )
+
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unable to send password reset email.",
+        )
+
+    return {
+        "message": "Password reset email sent successfully."
+    }
+
 
 @router.post(
     "/register",
