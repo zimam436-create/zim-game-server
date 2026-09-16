@@ -1,0 +1,7 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+zim-game-firebase-adminsdk-fbsvc-8554bbbc08.json
+firebase_test_token.txt
