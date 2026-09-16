@@ -12,10 +12,16 @@ from app.firebase import verify_firebase_token
 from app.dependencies import get_verified_firebase_user
 from database.models import User
 
+from app.matchmaking_api import router as matchmaking_router
+
+
 app = FastAPI(
     title="Zim Game Server",
     version="2.0.0",
 )
+
+app.include_router(users_router)
+app.include_router(matchmaking_router)
 
 security = HTTPBearer()
 
