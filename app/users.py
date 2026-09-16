@@ -1,3 +1,4 @@
+import requests
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -23,6 +24,8 @@ router = APIRouter(
 class RegisterRequest(BaseModel):
     username: str
 
+class PasswordResetRequest(BaseModel):
+    email: str
 
 @router.post(
     "/register",
@@ -158,4 +161,44 @@ def get_me(
         "username": current_user.username,
         "email": current_user.email,
         "firebase_uid": current_user.firebase_uid,
+    }
+
+
+@router.post("/password-reset")
+def request_password_reset(request: PasswordResetRequest):
+    """Ask Firebase to send a password-reset email."""
+
+    email = request.email.lower().strip()
+
+    if not email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Email address is required.",
+        )
+
+    firebase_api_key = "YOUR_FIREBASE_WEB_API_KEY"
+
+    url = (
+        "https://identitytoolkit.googleapis.com/v1/"
+        "accounts:sendOobCode"
+    )
+
+    response = requests.post(
+        url,
+        params={"key": firebase_api_key},
+        json={
+            "requestType": "PASSWORD_RESET",
+            "email": email,
+        },
+        timeout=10,
+    )
+
+    if response.status_code != 200:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Unable to send password reset email.",
+        )
+
+    return {
+        "message": "Password reset email sent successfully."
     }
