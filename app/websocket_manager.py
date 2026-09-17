@@ -70,20 +70,36 @@ class ConnectionManager:
             user_id,
         )
 
-        if websocket:
+        if websocket is None:
+            return
+
+        try:
             await websocket.send_json(message)
+        except Exception:
+            # The socket may have disappeared between the lookup
+            # and the send operation.
+            self.disconnect(match_id, user_id)
 
     async def broadcast(
         self,
         match_id: int,
         message: dict,
     ):
-        """Send a JSON message to every connected player in a match."""
+        """Send a JSON message to every currently connected player."""
 
         connections = self.connections.get(match_id, {})
 
-        for websocket in connections.values():
-            await websocket.send_json(message)
+        # Make a copy so the dictionary can safely change if
+        # a disconnected socket is removed during broadcasting.
+        players = list(connections.items())
+
+        for user_id, websocket in players:
+            try:
+                await websocket.send_json(message)
+            except Exception:
+                # One dead connection must not prevent the other
+                # player from receiving the message.
+                self.disconnect(match_id, user_id)
 
 
 connection_manager = ConnectionManager()

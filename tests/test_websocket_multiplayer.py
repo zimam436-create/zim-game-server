@@ -4,6 +4,7 @@ import json
 import pytest
 import websockets
 
+
 from database.database import SessionLocal
 from database.models import Match
 
@@ -327,4 +328,171 @@ async def test_complete_multiplayer_match():
         if player2 is not None:
             await player2.close()
 
+        delete_test_match(match_id)
+
+
+@pytest.mark.asyncio
+async def test_round_processing_failure_does_not_deadlock(monkeypatch):
+    """
+    Verify that if process_round() fails after both players
+    submit their choices, neither WebSocket gets stuck.
+
+    This test runs the FastAPI application in the same process
+    as pytest so monkeypatch can replace process_round().
+    """
+
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.websocket_api import router
+
+    app = FastAPI()
+    app.include_router(router)
+
+    # ---------------------------------------------------------
+    # Fake Firebase authentication
+    # ---------------------------------------------------------
+
+    def fake_verify_firebase_token(token):
+        if token == "player1-test-token":
+            return {
+                "uid": "BayfjUsyQ9esKhFlqGLLS3TRLDB2",
+                "email_verified": True,
+            }
+
+        if token == "player2-test-token":
+            return {
+                "uid": "C2XvGVXWYwWPWocEU7StcOZwdDW2",
+                "email_verified": True,
+            }
+
+        raise ValueError("Invalid test token.")
+
+    monkeypatch.setattr(
+        "app.websocket_api.verify_firebase_token",
+        fake_verify_firebase_token,
+    )
+
+    # ---------------------------------------------------------
+    # Force process_round() to fail
+    # ---------------------------------------------------------
+
+    def failing_process_round(
+        db,
+        match,
+        player1_choice,
+        player2_choice,
+    ):
+        raise RuntimeError(
+            "Simulated database/game processing failure."
+        )
+
+    monkeypatch.setattr(
+        "app.websocket_api.process_round",
+        failing_process_round,
+    )
+
+    match_id = create_test_match()
+
+    try:
+        # -----------------------------------------------------
+        # TestClient provides an in-process WebSocket client.
+        # -----------------------------------------------------
+
+        with TestClient(app) as client:
+
+            with client.websocket_connect(
+                f"/ws/matches/{match_id}?token=player1-test-token"
+            ) as player1:
+
+                with client.websocket_connect(
+                    f"/ws/matches/{match_id}?token=player2-test-token"
+                ) as player2:
+
+                    # -------------------------------------------------
+                    # Initial connection messages
+                    # -------------------------------------------------
+
+                    message1 = player1.receive_json()
+                    message2 = player2.receive_json()
+
+                    assert message1["type"] == "connected"
+                    assert message2["type"] == "connected"
+
+                    # -------------------------------------------------
+                    # Player 1 may receive waiting_for_opponent before
+                    # Player 2 connects.
+                    # Consume messages until both receive match_ready.
+                    # -------------------------------------------------
+
+                    ready1 = None
+                    while ready1 is None:
+                        message = player1.receive_json()
+
+                        if message["type"] == "match_ready":
+                            ready1 = message
+
+                    ready2 = None
+                    while ready2 is None:
+                        message = player2.receive_json()
+
+                        if message["type"] == "match_ready":
+                            ready2 = message
+
+                    assert ready1["type"] == "match_ready"
+                    assert ready2["type"] == "match_ready"
+                    # -------------------------------------------------
+                    # Submit Player 1 choice.
+                    # -------------------------------------------------
+
+                    player1.send_json(
+                        {
+                            "type": "choice",
+                            "choice": "rock",
+                        }
+                    )
+
+                    choice_received1 = player1.receive_json()
+
+                    assert choice_received1["type"] == "choice_received"
+
+                    # -------------------------------------------------
+                    # Submit Player 2 choice.
+                    # -------------------------------------------------
+
+                    player2.send_json(
+                        {
+                            "type": "choice",
+                            "choice": "scissors",
+                        }
+                    )
+
+                    choice_received2 = player2.receive_json()
+
+                    assert choice_received2["type"] == "choice_received"
+
+                    # -------------------------------------------------
+                    # The processor must fail.
+                    #
+                    # Both players must nevertheless receive
+                    # the error instead of one waiting forever.
+                    # -------------------------------------------------
+
+                    error1 = player1.receive_json()
+                    error2 = player2.receive_json()
+
+                    assert error1["type"] == "error"
+                    assert error2["type"] == "error"
+
+                    assert error1["message"] == (
+                        "An error occurred while processing "
+                        "the round."
+                    )
+
+                    assert error2["message"] == (
+                        "An error occurred while processing "
+                        "the round."
+                    )
+
+    finally:
         delete_test_match(match_id)

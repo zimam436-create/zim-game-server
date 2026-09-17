@@ -305,89 +305,95 @@ async def match_websocket(
                 # This player IS responsible for processing
                 # the round.
                 # =================================================
-
-                # -------------------------------------------------
-                # Get the two choices from this exact round.
-                # -------------------------------------------------
-
-                player1_choice = (
-                    round_state.choices.get(player1_id)
+                # Get the choices belonging to this exact round.
+                player1_choice, player2_choice = (
+                    await match_state.get_choices(round_state)
                 )
 
-                player2_choice = (
-                    round_state.choices.get(player2_id)
-                )
+                # Safety check.
+                #
+                # If this happens, the other player's WebSocket may
+                # already be waiting on this round's Event.
+                #
+                # Therefore we MUST finish/abort the round instead
+                # of simply continuing.
+                if (
+                    player1_choice is None
+                    or player2_choice is None
+                ):
+                    message = (
+                        "Both player choices were not available."
+                    )
 
-                # -------------------------------------------------
-                # Safety check
-                # -------------------------------------------------
-
-                if player1_choice is None or player2_choice is None:
+                    await match_state.fail_round(
+                        round_state=round_state,
+                        message=message,
+                    )
 
                     await connection_manager.broadcast(
                         match_id,
                         {
                             "type": "error",
-                            "message": (
-                                "Both player choices were not "
-                                "available."
-                            ),
+                            "message": message,
                         },
                     )
 
                     continue
 
-                # -------------------------------------------------
-                # Process round in PostgreSQL
-                # -------------------------------------------------
-
                 db = SessionLocal()
 
                 try:
-
+                    # Load the match from PostgreSQL.
+                    #
+                    # PostgreSQL remains the source of truth.
                     match = (
                         db.query(Match)
                         .filter(Match.id == match_id)
                         .first()
                     )
 
-                    if not match:
+                    if match is None:
+                        message = "Match no longer exists."
+
+                        await match_state.fail_round(
+                            round_state=round_state,
+                            message=message,
+                        )
 
                         await connection_manager.broadcast(
                             match_id,
                             {
                                 "type": "error",
-                                "message": (
-                                    "Match no longer exists."
-                                ),
+                                "message": message,
                             },
                         )
 
                         continue
 
-                    # -------------------------------------------------
-                    # Make sure match isn't already finished
-                    # -------------------------------------------------
-
+                    # The match may have been finished by another
+                    # request or connection.
                     if match.status == "finished":
+                        message = "This match has already finished."
+
+                        await match_state.fail_round(
+                            round_state=round_state,
+                            message=message,
+                        )
 
                         await connection_manager.broadcast(
                             match_id,
                             {
                                 "type": "error",
-                                "message": (
-                                    "This match has already "
-                                    "finished."
-                                ),
+                                "message": message,
                             },
                         )
 
                         continue
 
-                    # -------------------------------------------------
-                    # Process the round
-                    # -------------------------------------------------
-
+                    # Process the round.
+                    #
+                    # This updates PostgreSQL, calculates the winner,
+                    # updates the match score, and may finish the match.
                     result = process_round(
                         db=db,
                         match=match,
@@ -396,150 +402,101 @@ async def match_websocket(
                     )
 
                 except Exception as error:
-
+                    # IMPORTANT:
+                    #
+                    # The database operation may have failed.
+                    # Roll back any partial transaction first.
                     db.rollback()
 
                     print(
-                        f"Error processing match "
-                        f"{match_id}: {error}"
+                        f"Error processing round "
+                        f"for match {match_id}: {error}"
+                    )
+
+                    message = (
+                        "An error occurred while processing "
+                        "the round."
+                    )
+
+                    # IMPORTANT:
+                    #
+                    # Wake the other WebSocket handler.
+                    #
+                    # Without this, the other player could remain
+                    # blocked forever inside wait_for_round_result().
+                    await match_state.fail_round(
+                        round_state=round_state,
+                        message=message,
                     )
 
                     await connection_manager.broadcast(
                         match_id,
                         {
                             "type": "error",
-                            "message": (
-                                "An error occurred while "
-                                "processing the round."
-                            ),
+                            "message": message,
                         },
                     )
 
                     continue
 
                 finally:
-
                     db.close()
 
-                # -------------------------------------------------
-                # Save result into the RoundState.
+                # The database operation succeeded.
                 #
-                # This wakes up the other player's handler.
-                # -------------------------------------------------
-
+                # Store the result in this exact RoundState and wake
+                # the other player's WebSocket handler.
                 await match_state.finish_round(
                     round_state=round_state,
                     result=result,
                 )
 
-                # =================================================
-                # Determine human-readable round message
-                # =================================================
-
-                round_winner_id = result[
-                    "round_winner_id"
-                ]
-
-                if round_winner_id == player1_id:
-
-                    round_message = (
-                        f"Player {player1_id} won the round!"
-                    )
-
-                elif round_winner_id == player2_id:
-
-                    round_message = (
-                        f"Player {player2_id} won the round!"
-                    )
-
-                else:
-
-                    round_message = (
-                        "The round was a draw!"
-                    )
-
-                # =================================================
-                # Broadcast round result
-                # =================================================
-
+                # Send the round result to both players.
                 await connection_manager.broadcast(
                     match_id,
                     {
                         "type": "round_result",
-                        "round_number": result[
-                            "round_number"
-                        ],
+                        "round_number": result["round_number"],
                         "player1_choice": player1_choice,
                         "player2_choice": player2_choice,
-                        "round_winner_id": (
-                            round_winner_id
-                        ),
-                        "player1_score": result[
-                            "player1_score"
-                        ],
-                        "player2_score": result[
-                            "player2_score"
-                        ],
-                        "match_finished": result[
-                            "match_finished"
-                        ],
-                        "match_winner_id": result[
-                            "match_winner_id"
-                        ],
-                        "message": round_message,
+                        "round_winner_id": result["round_winner_id"],
+                        "player1_score": result["player1_score"],
+                        "player2_score": result["player2_score"],
+                        "match_finished": result["match_finished"],
+                        "match_winner_id": result["match_winner_id"],
                     },
                 )
 
-                # =================================================
-                # MATCH FINISHED
-                # =================================================
-
+                # If the match has finished, notify both players and
+                # remove the temporary in-memory state.
                 if result["match_finished"]:
-
                     await connection_manager.broadcast(
                         match_id,
                         {
                             "type": "match_finished",
                             "match_id": match_id,
-                            "winner_id": result[
-                                "match_winner_id"
-                            ],
-                            "player1_score": result[
-                                "player1_score"
-                            ],
-                            "player2_score": result[
-                                "player2_score"
-                            ],
+                            "winner_id": result["match_winner_id"],
+                            "player1_score": result["player1_score"],
+                            "player2_score": result["player2_score"],
                             "message": (
-                                f"Player "
-                                f"{result['match_winner_id']} "
+                                f"Player {result['match_winner_id']} "
                                 f"won the match!"
                             ),
                         },
                     )
 
-                    # Remove temporary in-memory state.
                     match_state_manager.remove_match(
                         match_id
                     )
 
                     break
 
-                # =================================================
-                # NEXT ROUND
-                # =================================================
-
+                # Match continues.
                 await connection_manager.broadcast(
                     match_id,
                     {
                         "type": "next_round",
-                        "round_number": (
-                            result["round_number"] + 1
-                        ),
-                        "message": (
-                            "Next round starts. "
-                            "Make your choice!"
-                        ),
+                        "round_number": result["round_number"] + 1,
                     },
                 )
 
@@ -573,6 +530,10 @@ async def match_websocket(
             match_id,
             user_id,
         )
+        # If nobody is connected anymore, discard the temporary
+        # in-memory match state. PostgreSQL remains the source of truth.
+        if not connection_manager.get_players(match_id):
+            match_state_manager.remove_match(match_id)
 
     except Exception as error:
 
@@ -585,3 +546,7 @@ async def match_websocket(
             match_id,
             user_id,
         )
+        # If nobody is connected anymore, discard the temporary
+        # in-memory match state. PostgreSQL remains the source of truth.
+        if not connection_manager.get_players(match_id):
+            match_state_manager.remove_match(match_id)
