@@ -13,7 +13,8 @@ from app.dependencies import get_verified_firebase_user
 from database.models import User
 
 from app.matchmaking_api import router as matchmaking_router
-
+from app.matches_api import router as matches_router
+from app.websocket_api import router as websocket_router
 
 app = FastAPI(
     title="Zim Game Server",
@@ -22,10 +23,9 @@ app = FastAPI(
 
 app.include_router(users_router)
 app.include_router(matchmaking_router)
-
+app.include_router(matches_router)
+app.include_router(websocket_router)
 security = HTTPBearer()
-
-app.include_router(users_router)
 
 
 @app.get("/")
