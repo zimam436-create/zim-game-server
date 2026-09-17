@@ -13,12 +13,19 @@ router = APIRouter(tags=["WebSocket"])
 
 
 @router.websocket("/ws/matches/{match_id}")
-async def match_websocket(websocket: WebSocket, match_id: int):
+async def match_websocket(
+    websocket: WebSocket,
+    match_id: int,
+):
     """
-    WebSocket endpoint for real-time multiplayer matches.
+    WebSocket endpoint for a real-time multiplayer match.
 
-    Development authentication:
-        /ws/matches/{match_id}?token=FIREBASE_ID_TOKEN
+    Authentication:
+        Firebase ID token is currently supplied through the
+        WebSocket query parameter.
+
+    Example:
+        ws://127.0.0.1:8000/ws/matches/9?token=FIREBASE_ID_TOKEN
     """
 
     # ---------------------------------------------------------
@@ -37,9 +44,14 @@ async def match_websocket(websocket: WebSocket, match_id: int):
 
     try:
         firebase_identity = verify_firebase_token(token)
+
     except Exception:
         await websocket.close(code=1008)
         return
+
+    # ---------------------------------------------------------
+    # 3. Require verified email
+    # ---------------------------------------------------------
 
     if not firebase_identity.get("email_verified", False):
         await websocket.close(code=1008)
@@ -52,7 +64,7 @@ async def match_websocket(websocket: WebSocket, match_id: int):
         return
 
     # ---------------------------------------------------------
-    # 3. Find user and match in PostgreSQL
+    # 4. Find PostgreSQL user and match
     # ---------------------------------------------------------
 
     db: Session = SessionLocal()
@@ -78,59 +90,60 @@ async def match_websocket(websocket: WebSocket, match_id: int):
             await websocket.close(code=1008)
             return
 
-        # Make sure this user is actually one of the players.
-        if user.id not in (match.player1_id, match.player2_id):
+        # Make sure this user actually belongs to this match.
+        if user.id not in (
+            match.player1_id,
+            match.player2_id,
+        ):
             await websocket.close(code=1008)
             return
 
         player1_id = match.player1_id
         player2_id = match.player2_id
+        user_id = user.id
 
     finally:
         db.close()
 
     # ---------------------------------------------------------
-    # 4. Create/get server-side match state
+    # 5. Get or create in-memory match state
     # ---------------------------------------------------------
 
-    match_state = match_state_manager.get_match(match_id)
-
-    if match_state is None:
-        match_state = match_state_manager.create_match(
-            match_id=match_id,
-            player1_id=player1_id,
-            player2_id=player2_id,
-        )
+    match_state = match_state_manager.get_or_create_match(
+        match_id=match_id,
+        player1_id=player1_id,
+        player2_id=player2_id,
+    )
 
     # ---------------------------------------------------------
-    # 5. Connect WebSocket
+    # 6. Register WebSocket connection
     # ---------------------------------------------------------
 
     await connection_manager.connect(
         match_id,
-        user.id,
+        user_id,
         websocket,
     )
 
     try:
 
         # -----------------------------------------------------
-        # 6. Tell player they connected
+        # 7. Tell player that connection succeeded
         # -----------------------------------------------------
 
         await connection_manager.send_to_player(
             match_id,
-            user.id,
+            user_id,
             {
                 "type": "connected",
                 "match_id": match_id,
-                "user_id": user.id,
+                "user_id": user_id,
                 "message": "Connected to match.",
             },
         )
 
         # -----------------------------------------------------
-        # 7. Check whether both players are connected
+        # 8. Check how many players are connected
         # -----------------------------------------------------
 
         players = connection_manager.get_players(match_id)
@@ -142,7 +155,10 @@ async def match_websocket(websocket: WebSocket, match_id: int):
                 {
                     "type": "match_ready",
                     "match_id": match_id,
-                    "message": "Both players are connected. Round 1 starts now!",
+                    "message": (
+                        "Both players are connected. "
+                        "Round 1 starts now!"
+                    ),
                 },
             )
 
@@ -150,16 +166,18 @@ async def match_websocket(websocket: WebSocket, match_id: int):
 
             await connection_manager.send_to_player(
                 match_id,
-                user.id,
+                user_id,
                 {
                     "type": "waiting_for_opponent",
                     "match_id": match_id,
-                    "message": "Waiting for your opponent to connect...",
+                    "message": (
+                        "Waiting for your opponent to connect..."
+                    ),
                 },
             )
 
         # -----------------------------------------------------
-        # 8. Main WebSocket loop
+        # 9. Main WebSocket loop
         # -----------------------------------------------------
 
         while True:
@@ -176,21 +194,37 @@ async def match_websocket(websocket: WebSocket, match_id: int):
 
                 choice = message.get("choice")
 
+                # -------------------------------------------------
+                # Validate that choice is a string
+                # -------------------------------------------------
+
                 if not isinstance(choice, str):
+
                     await connection_manager.send_to_player(
                         match_id,
-                        user.id,
+                        user_id,
                         {
                             "type": "error",
-                            "message": "Choice must be a string.",
+                            "message": (
+                                "Choice must be a string."
+                            ),
                         },
                     )
+
                     continue
+
+                # -------------------------------------------------
+                # Submit choice to MatchState
+                # -------------------------------------------------
 
                 try:
 
-                    accepted = match_state.submit_choice(
-                        user_id=user.id,
+                    (
+                        accepted,
+                        should_process,
+                        round_state,
+                    ) = await match_state.submit_choice(
+                        user_id=user_id,
                         choice=choice,
                     )
 
@@ -198,7 +232,7 @@ async def match_websocket(websocket: WebSocket, match_id: int):
 
                     await connection_manager.send_to_player(
                         match_id,
-                        user.id,
+                        user_id,
                         {
                             "type": "error",
                             "message": str(error),
@@ -207,45 +241,104 @@ async def match_websocket(websocket: WebSocket, match_id: int):
 
                     continue
 
-                # Player already submitted this round.
+                # -------------------------------------------------
+                # Duplicate choice
+                # -------------------------------------------------
+
                 if not accepted:
 
                     await connection_manager.send_to_player(
                         match_id,
-                        user.id,
+                        user_id,
                         {
                             "type": "error",
-                            "message": "You have already submitted your choice for this round.",
+                            "message": (
+                                "You have already submitted "
+                                "your choice for this round."
+                            ),
                         },
                     )
 
                     continue
 
-                # Do NOT reveal the choice to the opponent.
+                # -------------------------------------------------
+                # Tell player their choice was accepted
+                # -------------------------------------------------
+
                 await connection_manager.send_to_player(
                     match_id,
-                    user.id,
+                    user_id,
                     {
                         "type": "choice_received",
-                        "message": "Your choice has been received. Waiting for your opponent...",
+                        "message": (
+                            "Your choice has been received. "
+                            "Waiting for your opponent..."
+                        ),
                     },
                 )
 
+                # =================================================
+                # CASE A:
+                # This player is NOT responsible for processing
+                # the round.
+                # =================================================
+
+                if not should_process:
+
+                    # Wait for the exact round that this player
+                    # just submitted a choice for.
+                    result = (
+                        await match_state.wait_for_round_result(
+                            round_state
+                        )
+                    )
+
+                    # The other handler is responsible for
+                    # broadcasting the result.
+                    #
+                    # We do NOT broadcast here because that would
+                    # cause duplicate round_result messages.
+                    continue
+
+                # =================================================
+                # CASE B:
+                # This player IS responsible for processing
+                # the round.
+                # =================================================
+
                 # -------------------------------------------------
-                # Wait until both players have chosen
+                # Get the two choices from this exact round.
                 # -------------------------------------------------
 
-                if not match_state.both_players_chose():
+                player1_choice = (
+                    round_state.choices.get(player1_id)
+                )
+
+                player2_choice = (
+                    round_state.choices.get(player2_id)
+                )
+
+                # -------------------------------------------------
+                # Safety check
+                # -------------------------------------------------
+
+                if player1_choice is None or player2_choice is None:
+
+                    await connection_manager.broadcast(
+                        match_id,
+                        {
+                            "type": "error",
+                            "message": (
+                                "Both player choices were not "
+                                "available."
+                            ),
+                        },
+                    )
+
                     continue
 
                 # -------------------------------------------------
-                # Get both choices from server state
-                # -------------------------------------------------
-
-                player1_choice, player2_choice = match_state.get_choices()
-
-                # -------------------------------------------------
-                # Process official round in PostgreSQL
+                # Process round in PostgreSQL
                 # -------------------------------------------------
 
                 db = SessionLocal()
@@ -259,14 +352,41 @@ async def match_websocket(websocket: WebSocket, match_id: int):
                     )
 
                     if not match:
+
                         await connection_manager.broadcast(
                             match_id,
                             {
                                 "type": "error",
-                                "message": "Match no longer exists.",
+                                "message": (
+                                    "Match no longer exists."
+                                ),
                             },
                         )
-                        break
+
+                        continue
+
+                    # -------------------------------------------------
+                    # Make sure match isn't already finished
+                    # -------------------------------------------------
+
+                    if match.status == "finished":
+
+                        await connection_manager.broadcast(
+                            match_id,
+                            {
+                                "type": "error",
+                                "message": (
+                                    "This match has already "
+                                    "finished."
+                                ),
+                            },
+                        )
+
+                        continue
+
+                    # -------------------------------------------------
+                    # Process the round
+                    # -------------------------------------------------
 
                     result = process_round(
                         db=db,
@@ -275,61 +395,104 @@ async def match_websocket(websocket: WebSocket, match_id: int):
                         player2_choice=player2_choice,
                     )
 
-                except Exception:
+                except Exception as error:
 
                     db.rollback()
+
+                    print(
+                        f"Error processing match "
+                        f"{match_id}: {error}"
+                    )
 
                     await connection_manager.broadcast(
                         match_id,
                         {
                             "type": "error",
-                            "message": "An error occurred while processing the round.",
+                            "message": (
+                                "An error occurred while "
+                                "processing the round."
+                            ),
                         },
                     )
 
                     continue
 
                 finally:
+
                     db.close()
 
                 # -------------------------------------------------
-                # Determine round winner
+                # Save result into the RoundState.
+                #
+                # This wakes up the other player's handler.
                 # -------------------------------------------------
 
-                round_winner_id = result["round_winner_id"]
+                await match_state.finish_round(
+                    round_state=round_state,
+                    result=result,
+                )
+
+                # =================================================
+                # Determine human-readable round message
+                # =================================================
+
+                round_winner_id = result[
+                    "round_winner_id"
+                ]
 
                 if round_winner_id == player1_id:
-                    round_message = f"Player {player1_id} won the round!"
+
+                    round_message = (
+                        f"Player {player1_id} won the round!"
+                    )
 
                 elif round_winner_id == player2_id:
-                    round_message = f"Player {player2_id} won the round!"
+
+                    round_message = (
+                        f"Player {player2_id} won the round!"
+                    )
 
                 else:
-                    round_message = "The round was a draw!"
 
-                # -------------------------------------------------
-                # Broadcast official result
-                # -------------------------------------------------
+                    round_message = (
+                        "The round was a draw!"
+                    )
+
+                # =================================================
+                # Broadcast round result
+                # =================================================
 
                 await connection_manager.broadcast(
                     match_id,
                     {
                         "type": "round_result",
-                        "round_number": result["round_number"],
+                        "round_number": result[
+                            "round_number"
+                        ],
                         "player1_choice": player1_choice,
                         "player2_choice": player2_choice,
-                        "round_winner_id": round_winner_id,
-                        "player1_score": result["player1_score"],
-                        "player2_score": result["player2_score"],
-                        "match_finished": result["match_finished"],
-                        "match_winner_id": result["match_winner_id"],
+                        "round_winner_id": (
+                            round_winner_id
+                        ),
+                        "player1_score": result[
+                            "player1_score"
+                        ],
+                        "player2_score": result[
+                            "player2_score"
+                        ],
+                        "match_finished": result[
+                            "match_finished"
+                        ],
+                        "match_winner_id": result[
+                            "match_winner_id"
+                        ],
                         "message": round_message,
                     },
                 )
 
-                # -------------------------------------------------
-                # Match finished?
-                # -------------------------------------------------
+                # =================================================
+                # MATCH FINISHED
+                # =================================================
 
                 if result["match_finished"]:
 
@@ -338,52 +501,87 @@ async def match_websocket(websocket: WebSocket, match_id: int):
                         {
                             "type": "match_finished",
                             "match_id": match_id,
-                            "winner_id": result["match_winner_id"],
-                            "player1_score": result["player1_score"],
-                            "player2_score": result["player2_score"],
+                            "winner_id": result[
+                                "match_winner_id"
+                            ],
+                            "player1_score": result[
+                                "player1_score"
+                            ],
+                            "player2_score": result[
+                                "player2_score"
+                            ],
                             "message": (
-                                f"Player {result['match_winner_id']} "
+                                f"Player "
+                                f"{result['match_winner_id']} "
                                 f"won the match!"
                             ),
                         },
                     )
 
-                    match_state_manager.remove_match(match_id)
+                    # Remove temporary in-memory state.
+                    match_state_manager.remove_match(
+                        match_id
+                    )
 
                     break
 
-                # -------------------------------------------------
-                # Prepare for next round
-                # -------------------------------------------------
-
-                match_state.clear_choices()
+                # =================================================
+                # NEXT ROUND
+                # =================================================
 
                 await connection_manager.broadcast(
                     match_id,
                     {
                         "type": "next_round",
-                        "message": "Next round starts. Make your choice!",
+                        "round_number": (
+                            result["round_number"] + 1
+                        ),
+                        "message": (
+                            "Next round starts. "
+                            "Make your choice!"
+                        ),
                     },
                 )
 
-            # =================================================
-            # UNKNOWN MESSAGE
-            # =================================================
+            # =====================================================
+            # UNKNOWN MESSAGE TYPE
+            # =====================================================
 
             else:
 
                 await connection_manager.send_to_player(
                     match_id,
-                    user.id,
+                    user_id,
                     {
                         "type": "error",
                         "message": "Unknown message type.",
                     },
                 )
 
+    # =========================================================
+    # PLAYER DISCONNECTED
+    # =========================================================
+
     except WebSocketDisconnect:
+
+        print(
+            f"Player {user_id} disconnected "
+            f"from match {match_id}."
+        )
 
         connection_manager.disconnect(
             match_id,
-            user.id,
+            user_id,
+        )
+
+    except Exception as error:
+
+        print(
+            f"WebSocket error in match "
+            f"{match_id}, player {user_id}: {error}"
+        )
+
+        connection_manager.disconnect(
+            match_id,
+            user_id,
         )
