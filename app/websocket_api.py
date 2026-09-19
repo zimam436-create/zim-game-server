@@ -485,7 +485,7 @@ async def match_websocket(
                         },
                     )
 
-                    match_state_manager.remove_match(
+                    await match_state_manager.remove_match(
                         match_id
                     )
 
@@ -533,7 +533,7 @@ async def match_websocket(
         # If nobody is connected anymore, discard the temporary
         # in-memory match state. PostgreSQL remains the source of truth.
         if not connection_manager.get_players(match_id):
-            match_state_manager.remove_match(match_id)
+            await match_state_manager.remove_match(match_id)
 
     except Exception as error:
 
@@ -549,4 +549,4 @@ async def match_websocket(
         # If nobody is connected anymore, discard the temporary
         # in-memory match state. PostgreSQL remains the source of truth.
         if not connection_manager.get_players(match_id):
-            match_state_manager.remove_match(match_id)
+            await match_state_manager.remove_match(match_id)

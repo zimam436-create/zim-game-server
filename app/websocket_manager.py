@@ -14,7 +14,12 @@ class ConnectionManager:
         user_id: int,
         websocket: WebSocket,
     ):
-        """Accept and register a player's WebSocket connection."""
+        """
+        Accept and register a player's WebSocket connection.
+
+        If the player already has a connection, the new connection
+        replaces the old one.
+        """
 
         await websocket.accept()
 
@@ -27,10 +32,29 @@ class ConnectionManager:
         self,
         match_id: int,
         user_id: int,
+        websocket: WebSocket | None = None,
     ):
-        """Remove a player's WebSocket connection."""
+        """
+        Remove a player's WebSocket connection.
+
+        If a specific websocket is supplied, only remove it if it is
+        still the currently registered connection.
+
+        This prevents an old connection from accidentally deleting
+        a newer connection after the player reconnects.
+        """
 
         if match_id not in self.connections:
+            return
+
+        current_websocket = self.connections[match_id].get(user_id)
+
+        if current_websocket is None:
+            return
+
+        # If a specific socket was supplied, make sure we are
+        # removing that exact socket and not a newer connection.
+        if websocket is not None and current_websocket is not websocket:
             return
 
         self.connections[match_id].pop(user_id, None)
@@ -43,7 +67,7 @@ class ConnectionManager:
         match_id: int,
         user_id: int,
     ):
-        """Return a player's active WebSocket connection."""
+        """Return the player's active WebSocket."""
 
         return self.connections.get(match_id, {}).get(user_id)
 
@@ -51,7 +75,7 @@ class ConnectionManager:
         self,
         match_id: int,
     ):
-        """Return the user IDs currently connected to a match."""
+        """Return user IDs currently connected to the match."""
 
         return list(
             self.connections.get(match_id, {}).keys()
@@ -75,31 +99,42 @@ class ConnectionManager:
 
         try:
             await websocket.send_json(message)
+
         except Exception:
-            # The socket may have disappeared between the lookup
-            # and the send operation.
-            self.disconnect(match_id, user_id)
+            # Only remove this socket if it is still the active one.
+            self.disconnect(
+                match_id,
+                user_id,
+                websocket,
+            )
 
     async def broadcast(
         self,
         match_id: int,
         message: dict,
     ):
-        """Send a JSON message to every currently connected player."""
+        """Send a JSON message to every connected player."""
 
-        connections = self.connections.get(match_id, {})
+        connections = self.connections.get(
+            match_id,
+            {},
+        )
 
-        # Make a copy so the dictionary can safely change if
-        # a disconnected socket is removed during broadcasting.
+        # Make a copy so the dictionary can safely change
+        # while broadcasting.
         players = list(connections.items())
 
         for user_id, websocket in players:
             try:
                 await websocket.send_json(message)
+
             except Exception:
-                # One dead connection must not prevent the other
-                # player from receiving the message.
-                self.disconnect(match_id, user_id)
+                # Only remove this specific socket.
+                self.disconnect(
+                    match_id,
+                    user_id,
+                    websocket,
+                )
 
 
 connection_manager = ConnectionManager()

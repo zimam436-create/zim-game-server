@@ -15,6 +15,8 @@ from database.models import User
 from app.matchmaking_api import router as matchmaking_router
 from app.matches_api import router as matches_router
 from app.websocket_api import router as websocket_router
+from app.leaderboard_api import router as leaderboard_router
+from app.matchmaking_websocket import router as matchmaking_websocket_router
 
 app = FastAPI(
     title="Zim Game Server",
@@ -25,6 +27,8 @@ app.include_router(users_router)
 app.include_router(matchmaking_router)
 app.include_router(matches_router)
 app.include_router(websocket_router)
+app.include_router(leaderboard_router)
+app.include_router(matchmaking_websocket_router)
 security = HTTPBearer()
 
 
